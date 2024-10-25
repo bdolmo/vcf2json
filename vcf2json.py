@@ -5,9 +5,19 @@ import sys
 import argparse
 import json
 import re
+import gzip
 from pathlib import Path
 from collections import defaultdict
 from pprint import pprint
+
+# from https://stackoverflow.com/a/61654064
+# Opens the file with gzip open if it's a .gz file.  Opens regularly otherwise.
+# As a function, this allows opening the file using 'with' making sure it'll be closed.
+def open_smart(filename ):
+    if filename.endswith(".gz"):
+        return(gzip.open(filename, "rt"))
+    else:
+        return(open(filename))
 
 def create_vep_dict(info):
 
@@ -21,7 +31,7 @@ def create_vep_dict(info):
         fields = rawfields.split('|')
         i = 0
         for field in fields:
-            vep_list.append(field)
+            vep_list.append(field.strip())
             vep_dict[field] = i
             i += 1
 
@@ -29,7 +39,9 @@ def create_vep_dict(info):
 
 def convert_vcf_2_json(vcf):
 
-    out_json = vcf.replace(".vcf", ".json")
+    # Change the last instance of .vcf to .json, not just all of them.
+    # From https://stackoverflow.com/a/3679215
+    out_json = '.json'.join(vcf.rsplit(".vcf", 1) )
 
     vcf_dict =  defaultdict(dict)
     vcf_dict['header'] =  defaultdict(list)
@@ -40,7 +52,8 @@ def convert_vcf_2_json(vcf):
     ##source=Mutect2,freeBayes
     ##reference=/home/bdelolmo/Desktop/PIPELINE/BUNDLE/ucsc.hg19.fasta
     n_var = 0
-    with open (vcf) as f:
+    
+    with open_smart( vcf ) as f:
         for line in f:
             line = line.rstrip('\n')
             # Parsing header
@@ -68,6 +81,8 @@ def convert_vcf_2_json(vcf):
 
                 if re.search("ID=CSQ", line):
                     vep_dict, vep_list = create_vep_dict(line)
+                if re.search("ID=GENE_TRANSCRIPT_XREF", line):
+                    xref_dict, xref_list = create_vep_dict(line)
                 if re.search("ID=CIVIC", line):
                     civic_dict, civic_list = create_vep_dict(line)
                 if re.search('##FORMAT', line):
@@ -96,8 +111,6 @@ def convert_vcf_2_json(vcf):
                 qual= tmp[5]
                 filter = tmp[6]
                 info = tmp[7]
-                format_tag = tmp[8]
-                format = tmp[9]
 
                 var_name = "var_" + str(n_var)
                 vcf_dict['variants'][var_name] = defaultdict(dict)
@@ -113,21 +126,31 @@ def convert_vcf_2_json(vcf):
                 vcf_dict['variants'][var_name]['INFO'] = defaultdict(dict)
                 for item in info_list:
                     tmp_item = item.split('=')
-                    if item.startswith('CSQ'):
-                        vcf_dict['variants'][var_name]['INFO']['CSQ'] = defaultdict(dict)
+                    if item.startswith('CSQ') or item.startswith('GENE_TRANSCRIPT_XREF'):
+                        type = 'GENE_TRANSCRIPT_XREF'
+                        format_list = xref_list
+                        if item.startswith('CSQ'):
+                            type = 'CSQ'
+                            format_list = vep_list
+                        # If we have a CSQ, we need to go back to our original info data.
+                        # CSQ can have 
+                        vcf_dict['variants'][var_name]['INFO'][type] = defaultdict(dict)
+                        
                         tmp_multidim = item.split(',')
                         n = 0
                         for subitem in tmp_multidim:
-                            subitem = subitem.replace("CSQ=", "")
+                            subitem = subitem.replace(f"{type}=", "")
                             conseq_name = "consequence_"+str(n)
                             tmp_subfield = subitem.split('|')
                             num_field = 0
                             for subfield in tmp_subfield:
                                 if subfield == "":
                                     subfield = '.'
-                                subitem_name = vep_list[num_field]
+                                if '&' in subfield:
+                                    subfield = subfield.split('&')
+                                subitem_name = format_list[num_field]
                                 #print (subfield + " " + subitem_name + " " + str(num_field))
-                                vcf_dict['variants'][var_name]['INFO']['CSQ'][subitem_name] = subfield
+                                vcf_dict['variants'][var_name]['INFO'][type][subitem_name] = subfield
                                 num_field=num_field+1
                             n =n+1
                     elif item.startswith('CIVIC'):
@@ -144,20 +167,27 @@ def convert_vcf_2_json(vcf):
                                 num_field=num_field+1
                             n =n+1
                     else:
-                        vcf_dict['variants'][var_name]['INFO'][tmp_item[0]] = tmp_item[1]
+                        if len(tmp_item) < 2:
+                            vcf_dict['variants'][var_name]['INFO'][tmp_item[0]] = ""
+                        else:
+                            vcf_dict['variants'][var_name]['INFO'][tmp_item[0]] = tmp_item[1]
  
-                tmp_format_tag = format_tag.split(':')
-                tmp_format = format.split(':')
-                j = 0
-                for val in tmp_format:
-                    vcf_dict['variants'][var_name][tmp_format_tag[j]] = val
-                    j=j+1
+                if len(tmp) > 9:
+                    print( tmp )
+                    format_tag = tmp[8]
+                    format = tmp[9]
+                    tmp_format_tag = format_tag.split(':')
+                    tmp_format = format.split(':')
+                    j = 0
+                    for val in tmp_format:
+                        vcf_dict['variants'][var_name][tmp_format_tag[j]] = val
+                        j=j+1
 
                 n_var = n_var+1
                 #chr1	65301110	.	C	T	.	.
 
     with open(out_json, 'w') as fp:
-        json.dump(vcf_dict, fp)
+        json.dump(vcf_dict, fp, indent=4)
 
 
 parser = argparse.ArgumentParser(description='Description: Convert VCF to JSON')
